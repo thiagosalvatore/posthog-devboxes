@@ -1,0 +1,9 @@
+# Paths that conflict on every sync by design. `dbx status` counts everything
+# else as unexpected. One path per line, matched exactly against mutagen's
+# conflict roots.
+#
+# .env is generated on both sides and holds host-specific values, so one-way-safe
+# can only ever report it. Adding it to ~/.hogli/mutagen.yml (see
+# mutagen-extra-ignores.txt) removes it for good, but only for sessions created
+# after that edit, since the ignore list is read at session-create time.
+.env

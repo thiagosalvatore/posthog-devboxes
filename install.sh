@@ -10,8 +10,8 @@ if ! grep -q '# >>> coder-dotfiles >>>' ~/.bash_aliases 2>/dev/null; then
 alias gcm='git checkout master'
 alias gcmm='git checkout main'
 alias gpp='git pull'
-# Re-select the slim stack after `hogli nuke` resets it.
-alias slim='bash ~/.config/coderv2/dotfiles/posthog-slim-stack.sh'
+# Re-select the dev-stack intents after `hogli nuke` resets them.
+alias slim='bash ~/.config/coderv2/dotfiles/posthog-intents.sh'
 # Ghostty's TERM has no terminfo on the box, which breaks clear/less/vim.
 [ "$TERM" = xterm-ghostty ] && export TERM=xterm-256color
 # <<< coder-dotfiles <<<
@@ -52,11 +52,16 @@ cp -R "$SCRIPT_DIR/claude/skills/." ~/.claude/skills/ \
   || echo "coder-dotfiles: claude skills copy FAILED"
 
 # --- Background work ---
-# None block workspace start: ~5 repo clones, a marketplace clone plus 3 plugin installs, the slim stack selection, a phrocs refresh, and the agent skills install.
+# None block workspace start: ~5 repo clones, a marketplace clone plus 3 plugin installs, the intent selection, a phrocs refresh, and the agent skills install.
 nohup bash "$SCRIPT_DIR/clone-repos.sh" >> "$HOME/.coder-dotfiles-clone.log" 2>&1 &
 nohup bash "$SCRIPT_DIR/install-claude-plugins.sh" >> "$HOME/.coder-dotfiles-plugins.log" 2>&1 &
-nohup bash "$SCRIPT_DIR/posthog-slim-stack.sh" >> "$HOME/.coder-dotfiles-slim-stack.log" 2>&1 &
+nohup bash "$SCRIPT_DIR/posthog-intents.sh" >> "$HOME/.coder-dotfiles-intents.log" 2>&1 &
 nohup bash "$SCRIPT_DIR/install-phrocs.sh" >> "$HOME/.coder-dotfiles-phrocs.log" 2>&1 &
 nohup bash "$SCRIPT_DIR/install-agent-skills.sh" >> "$HOME/.coder-dotfiles-skills.log" 2>&1 &
 
-echo "coder-dotfiles: install.sh done (repo clones -> ~/.coder-dotfiles-clone.log, claude plugins -> ~/.coder-dotfiles-plugins.log, slim stack -> ~/.coder-dotfiles-slim-stack.log, phrocs -> ~/.coder-dotfiles-phrocs.log, skills -> ~/.coder-dotfiles-skills.log)"
+# Last line on purpose. `set -euo pipefail` means the stamp only appears when
+# every step above succeeded, so the laptop can poll a fact instead of guessing
+# from the age of a file the AMI happens to carry.
+date -u +%Y-%m-%dT%H:%M:%SZ > ~/.coder-dotfiles-ready
+
+echo "coder-dotfiles: install.sh done (repo clones -> ~/.coder-dotfiles-clone.log, claude plugins -> ~/.coder-dotfiles-plugins.log, intents -> ~/.coder-dotfiles-intents.log, phrocs -> ~/.coder-dotfiles-phrocs.log, skills -> ~/.coder-dotfiles-skills.log)"

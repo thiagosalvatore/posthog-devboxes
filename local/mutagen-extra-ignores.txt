@@ -1,0 +1,11 @@
+# Extra mutagen ignore paths `dbx doctor` checks for and `local/bootstrap.sh`
+# appends to ~/.hogli/mutagen.yml. hogli seeds that file from its packaged
+# defaults and never overwrites a copy you have edited, so these live here
+# rather than in an upstream PR.
+#
+# .context is a Conductor scratch directory, excluded per-clone via
+# .git/info/exclude rather than a tracked .gitignore.
+.context
+# .env is generated on both sides from the same template with host-specific
+# values. Every sync reports it as a conflict until it is ignored outright.
+.env

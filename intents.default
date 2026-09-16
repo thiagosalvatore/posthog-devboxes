@@ -1,0 +1,6 @@
+# Intents the devbox dev stack runs with.
+# Read by posthog-intents.sh on the box and by `dbx services` on the laptop,
+# so both halves select the same units. Names come from devenv/intent-map.yaml.
+# data_warehouse and ai_features both pull temporal_workflows, which the
+# default product_analytics-only selection leaves out.
+data_warehouse ai_features product_analytics

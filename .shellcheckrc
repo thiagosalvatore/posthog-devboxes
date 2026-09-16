@@ -1,0 +1,4 @@
+# dbx is one program split across local/lib/*.sh, sourced at runtime from a path
+# built at startup. shellcheck cannot follow that, so it reads every constant a
+# sibling file uses as unused and every source as unresolvable.
+disable=SC1091,SC2034

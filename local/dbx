@@ -1,0 +1,405 @@
+#!/usr/bin/env bash
+# Take a PostHog worktree from nothing to a working devbox, and keep it there.
+#
+# Run it from inside any worktree. Every subcommand resolves that worktree to one
+# devbox and refuses to touch a box that is serving a different one.
+set -euo pipefail
+
+# Installed as a symlink in ~/.local/bin, so resolve back to the repo checkout
+# before locating lib/ and the shared data files next to it.
+DBX_SELF="${BASH_SOURCE[0]}"
+while [ -L "$DBX_SELF" ]; do
+    DBX_TARGET="$(readlink "$DBX_SELF")"
+    case "$DBX_TARGET" in
+    /*) DBX_SELF="$DBX_TARGET" ;;
+    *) DBX_SELF="$(dirname "$DBX_SELF")/$DBX_TARGET" ;;
+    esac
+done
+DBX_LIB="$(cd "$(dirname "$DBX_SELF")" && pwd -P)/lib"
+DBX_ROOT="$(cd "$(dirname "$DBX_SELF")/.." && pwd -P)"
+
+# shellcheck source=lib/common.sh
+source "$DBX_LIB/common.sh"
+# shellcheck source=lib/registry.sh
+source "$DBX_LIB/registry.sh"
+# shellcheck source=lib/worktree.sh
+source "$DBX_LIB/worktree.sh"
+# shellcheck source=lib/sync.sh
+source "$DBX_LIB/sync.sh"
+# shellcheck source=lib/align.sh
+source "$DBX_LIB/align.sh"
+# shellcheck source=lib/services.sh
+source "$DBX_LIB/services.sh"
+
+usage() {
+    cat <<'EOF'
+usage: dbx [-C <path>] [--workspace <name>] <command> [options]
+
+  up          Start the devbox, align it, sync, apply intents, migrate
+  sync        Guard the worktree binding, align, flush, report conflicts, migrate
+  align       Bring the devbox checkout to this worktree's tree
+  status      Label, box state, conflicts, migrations, per-service verdict
+  services    Apply intents, restart if the generated config changed, verify
+  migrate     Apply migrations on the devbox
+  exec        Run a command on the devbox
+  doctor      Check the local prerequisites dbx and hogli depend on
+
+options:
+  -C <path>           Act on the worktree at <path> instead of the cwd
+  --workspace <name>  Bind this worktree to a named devbox
+  --dry-run           (align) Print the plan without changing the checkout
+  --force             (align, sync) Align even when the box has unexplained changes
+  --repoint           (sync) Terminate a session bound elsewhere and recreate it here
+  --no-migrate        (up, sync) Skip the migration step
+EOF
+}
+
+START_DIR=$PWD
+DRY_RUN=0
+FORCE=0
+REPOINT=0
+MIGRATE=1
+COMMAND=""
+EXEC_ARGV=()
+
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        -C)
+            START_DIR=${2:?-C needs a path}
+            shift 2
+            ;;
+        --workspace)
+            DBX_WORKSPACE=${2:?--workspace needs a name}
+            shift 2
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --force)
+            FORCE=1
+            shift
+            ;;
+        --repoint)
+            REPOINT=1
+            shift
+            ;;
+        --no-migrate)
+            MIGRATE=0
+            shift
+            ;;
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        up | sync | align | status | services | migrate | doctor)
+            COMMAND=$1
+            shift
+            ;;
+        exec)
+            COMMAND="exec"
+            shift
+            [ "${1:-}" = "--" ] && shift
+            EXEC_ARGV=("$@")
+            return 0
+            ;;
+        *)
+            usage >&2
+            die "$DBX_EXIT_USAGE" "Unknown argument: $1"
+            ;;
+        esac
+    done
+}
+
+# Everything below `doctor` needs a worktree, a box name and a reachable box.
+bind_worktree() {
+    resolve_worktree "$START_DIR"
+    resolve_workspace
+    log "worktree $WORKTREE_ROOT -> $WORKSPACE_NAME"
+}
+
+workspace_status() {
+    "$(coder_bin)" list --output json 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    workspaces = json.loads(sys.stdin.read() or "[]")
+except json.JSONDecodeError:
+    workspaces = []
+for workspace in workspaces:
+    if workspace.get("name") == sys.argv[1]:
+        print(workspace.get("latest_build", {}).get("status", "unknown"))
+        break
+else:
+    print("absent")
+' "$WORKSPACE_NAME"
+}
+
+box_count() {
+    "$(coder_bin)" list --output json 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    workspaces = json.loads(sys.stdin.read() or "[]")
+except json.JSONDecodeError:
+    workspaces = []
+print(sum(1 for w in workspaces if (w.get("name") or "").startswith(sys.argv[1])))
+' "$(workspace_prefix)"
+}
+
+# Coder applies dotfiles_uri when it builds a workspace, so saving it only helps
+# boxes that start after this point. An already-running box needs a stop/start.
+ensure_dotfiles_uri() {
+    local current
+    current="$(python3 -c '
+import json
+import pathlib
+import sys
+
+try:
+    print(json.loads(pathlib.Path(sys.argv[1]).read_text()).get("dotfiles_uri") or "")
+except Exception:
+    print("")
+' "$HOGLI_DEVBOX_CONFIG")"
+    if [ "$current" = "$DOTFILES_URI" ]; then
+        return 0
+    fi
+    python3 -c '
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+try:
+    config = json.loads(path.read_text())
+except Exception:
+    config = {}
+config["dotfiles_uri"] = sys.argv[2]
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(config, indent=2) + "\n")
+' "$HOGLI_DEVBOX_CONFIG" "$DOTFILES_URI"
+    log "saved dotfiles_uri=$DOTFILES_URI for new devboxes"
+}
+
+dotfiles_landed() {
+    remote "test -d \"\$HOME/.config/coderv2/dotfiles\" && test -f $DOTFILES_READY_STAMP" 2>/dev/null
+}
+
+wait_for_box() {
+    local waited=0
+    until remote true 2>/dev/null; do
+        [ "$waited" -ge "${DBX_SSH_TIMEOUT:-300}" ] \
+            && die "$DBX_EXIT_NOT_READY" "Devbox '$WORKSPACE_NAME' did not answer over ssh."
+        [ "$waited" -eq 0 ] && log "waiting for $WORKSPACE_NAME to answer over ssh..."
+        sleep 5
+        waited=$((waited + 5))
+    done
+    log "ssh: $WORKSPACE_NAME is reachable"
+}
+
+# Non-fatal: dbx applies the intents and starts the stack from the laptop, so
+# the dotfiles landing is a convenience, not a prerequisite.
+warn_if_dotfiles_missing() {
+    dotfiles_landed && return 0
+    warn "This box has no dotfiles clone, so its boot-time scripts never ran."
+    warn "Coder only applies dotfiles_uri on a build: run \`hogli devbox:stop${WORKSPACE_LABEL:+ $WORKSPACE_LABEL}\` then \`dbx up\`."
+}
+
+cmd_up() {
+    bind_worktree
+    ensure_dotfiles_uri
+    local count
+    count="$(box_count)"
+    log "you own $count devbox(es)"
+    if [ "$count" -ge "${DBX_BOX_WARN:-3}" ]; then
+        warn "Each box carries its own disk. \`dbx sync --repoint\` moves an existing one instead of adding another."
+    fi
+
+    case "$(workspace_status)" in
+    running) log "devbox $WORKSPACE_NAME is already running" ;;
+    *) hogli devbox:start ${HOGLI_WS_ARGS[@]+"${HOGLI_WS_ARGS[@]}"} ;;
+    esac
+
+    confirm_ssh_alias
+    wait_for_box
+    warn_if_dotfiles_missing
+    push_dotfiles_scripts
+
+    assert_binding
+    align_run "$FORCE"
+    flush_or_create
+    report_conflicts || true
+    apply_intents
+    verify_services 300 || warn "some services did not come up; see the lines above"
+    [ "$MIGRATE" = "1" ] && run_migrations
+    log "done"
+}
+
+cmd_sync() {
+    bind_worktree
+    confirm_ssh_alias
+    if [ "$REPOINT" = "1" ]; then
+        log "repointing $WORKSPACE_NAME at $WORKTREE_ROOT"
+        sync_terminate
+        registry_bind "$WORKTREE_ROOT" "$WORKSPACE_LABEL" "$WORKSPACE_NAME"
+    else
+        assert_binding
+    fi
+    align_run "$FORCE"
+    flush_or_create
+    sync_wait_settled
+    report_conflicts || true
+    [ "$MIGRATE" = "1" ] && run_migrations
+    log "done"
+}
+
+cmd_align() {
+    bind_worktree
+    confirm_ssh_alias
+    if [ "$DRY_RUN" = "1" ]; then
+        assert_binding
+        align_plan
+        return 0
+    fi
+    assert_binding
+    align_run "$FORCE"
+}
+
+flush_or_create() {
+    if session_exists; then
+        sync_flush
+    else
+        sync_create
+    fi
+}
+
+cmd_status() {
+    bind_worktree
+    log "box state: $(workspace_status)"
+    if ! remote true 2>/dev/null; then
+        warn "not reachable over ssh"
+        return "$DBX_EXIT_NOT_READY"
+    fi
+    push_dotfiles_scripts
+    if dotfiles_landed; then
+        log "dotfiles: applied"
+    else
+        warn "dotfiles: never ran on this box"
+    fi
+    if session_exists; then
+        log "sync: $(session_state), serving $(session_alpha)"
+        if [ "$(session_alpha)" != "$WORKTREE_ROOT" ]; then
+            warn "that is a different worktree; \`dbx sync\` here would refuse"
+        fi
+        [ -z "$(session_last_error)" ] || warn "sync error: $(session_last_error)"
+        report_conflicts || true
+    else
+        warn "sync: no session"
+    fi
+    log "last align: $(registry_last_align "$WORKTREE_ROOT")"
+    local migrations
+    migrations="$(migration_state)"
+    if [ "$migrations" = "in sync" ]; then
+        log "migrations: in sync"
+    else
+        warn "migrations: $migrations"
+    fi
+    verify_services 20 || true
+}
+
+cmd_services() {
+    bind_worktree
+    confirm_ssh_alias
+    assert_binding
+    push_dotfiles_scripts
+    apply_intents
+    verify_services 300
+}
+
+cmd_migrate() {
+    bind_worktree
+    confirm_ssh_alias
+    assert_binding
+    run_migrations
+}
+
+cmd_exec() {
+    bind_worktree
+    [ "${#EXEC_ARGV[@]}" -gt 0 ] || die "$DBX_EXIT_USAGE" "dbx exec needs a command after --."
+    hogli devbox:exec ${HOGLI_WS_ARGS[@]+"${HOGLI_WS_ARGS[@]}"} -- "${EXEC_ARGV[@]}"
+}
+
+# Copies the scripts the laptop calls on the box, so dbx works before -- or
+# without -- Coder ever cloning the dotfiles repo there.
+push_dotfiles_scripts() {
+    remote "mkdir -p \"\$HOME/.config/coderv2/dotfiles\""
+    scp -q "$DBX_ROOT/proc-status.sh" "coder.${WORKSPACE_NAME}:.config/coderv2/dotfiles/proc-status.sh" \
+        || die "$DBX_EXIT_ERROR" "Could not copy proc-status.sh to $WORKSPACE_NAME."
+}
+
+cmd_doctor() {
+    local status=0
+    resolve_worktree "$START_DIR"
+    log "worktree: $WORKTREE_ROOT"
+
+    if ssh -G "coder.example" 2>/dev/null | grep -qi '^proxycommand .'; then
+        log "ssh: the Host coder.* block is installed"
+    else
+        warn "ssh: no Host coder.* block. Run \`hogli devbox:setup\`."
+        status=1
+    fi
+
+    # Read-only on purpose: any `mutagen` subcommand would start the daemon it
+    # is meant to be reporting on.
+    if pgrep -f 'mutagen.*daemon run' >/dev/null 2>&1; then
+        log "mutagen: the daemon is up"
+    else
+        warn "mutagen: no daemon is running. Run \`hogli devbox:sync\`."
+        status=1
+    fi
+
+    if grep -q "\"dotfiles_uri\"" "$HOGLI_DEVBOX_CONFIG" 2>/dev/null; then
+        log "dotfiles_uri: set in $HOGLI_DEVBOX_CONFIG"
+    else
+        warn "dotfiles_uri: unset in $HOGLI_DEVBOX_CONFIG, so no devbox ever clones this repo."
+        warn "  Fix: dbx up, or \`hogli devbox:setup --configure-dotfiles\`."
+        status=1
+    fi
+
+    local missing
+    missing="$(ignore_list_drift)"
+    if [ -z "$missing" ]; then
+        log "mutagen ignores: $HOGLI_MUTAGEN_CONFIG covers every path in local/mutagen-extra-ignores.txt"
+    else
+        warn "mutagen ignores: $HOGLI_MUTAGEN_CONFIG is missing $(printf '%s' "$missing" | tr '\n' ' ')"
+        warn "  Fix: bash $DBX_ROOT/local/bootstrap.sh"
+        status=1
+    fi
+    return "$status"
+}
+
+# Paths dbx wants ignored that the user's own mutagen config does not list.
+ignore_list_drift() {
+    local path
+    while IFS= read -r path; do
+        case "$path" in '' | '#'*) continue ;; esac
+        grep -qE "^\s*- '?${path}'?\s*$" "$HOGLI_MUTAGEN_CONFIG" 2>/dev/null || echo "$path"
+    done <"$DBX_ROOT/local/mutagen-extra-ignores.txt"
+}
+
+main() {
+    parse_args "$@"
+    [ -n "$COMMAND" ] || {
+        usage >&2
+        exit "$DBX_EXIT_USAGE"
+    }
+    require_cmd python3
+    require_cmd git
+    require_cmd ssh
+    "cmd_$COMMAND"
+}
+
+main "$@"
