@@ -7,30 +7,101 @@ Personal tooling for PostHog Coder devboxes, in two halves.
 
 ## Runs on your laptop
 
+`dbx` runs a PostHog worktree's code on a devbox so your machine does not have to run the
+stack. It is one command to get a box working and one to keep it that way.
+
 ### Install
 
 ```bash
 bash local/bootstrap.sh
 ```
 
-It links `local/dbx` into `~/.local/bin`, saves this repo as the `dotfiles_uri` new devboxes clone, and adds the ignore paths hogli's packaged mutagen defaults miss.
+It links `local/dbx` into `~/.local/bin`, installs the `testing-on-devboxes` skill for
+Claude Code and Codex, saves this repo as the `dotfiles_uri` new devboxes clone, and adds
+the ignore paths hogli's packaged mutagen defaults miss. Re-run it after a `git pull`.
 
-### `dbx`
+Prerequisites are whatever `hogli devbox:setup` installs: the Coder CLI, a login, and the
+`Host coder.*` block in your ssh config. `dbx doctor` tells you if any of it is missing.
 
-Run it from inside any PostHog worktree. `-C <path>` runs it against a worktree somewhere else.
+### Get a box working
+
+From inside the worktree you want to test:
+
+```bash
+dbx up
+```
+
+That creates the devbox if it does not exist, brings the box's checkout to your tree, starts
+the file sync, selects the dev-stack units, verifies they are actually up, and migrates. On a
+brand-new box expect a long first run: a fresh AMI, a full dependency install, and a cold
+Rust build.
+
+Then check what you got, and put the app on localhost so a browser can reach it:
+
+```bash
+dbx status
+hogli devbox:forward
+```
+
+`dbx up` is idempotent. Re-run it after a rebase, or any time you are unsure of the state,
+rather than working out what changed.
+
+### While you work
+
+Your edits sync continuously once the session exists, so ordinary editing needs no command.
+
+| When | Run |
+|---|---|
+| You committed, rebased, or switched branches | `dbx sync` |
+| Something looks stale | `dbx status` |
+| You changed which products you work on (edit `intents.default`) | `dbx services` |
+| You want one command on the box | `dbx exec -- <cmd>` |
+| Anything is broken | `dbx doctor` |
+
+### Finish up
+
+```bash
+hogli devbox:destroy    # done with the task; takes the 100GB disk with it
+hogli devbox:stop       # back tomorrow; keeps the disk, stops the compute
+```
+
+Check for work stranded on the box before destroying. `dbx align --dry-run` answers it
+directly: `commits only on the box` and `unexplained working-tree paths on the box` should
+both read `0`.
+
+```bash
+dbx align --dry-run
+```
+
+### Every command
+
+Run from inside a worktree. `-C <path>` acts on a worktree somewhere else.
 
 | Command | Does |
 |---|---|
 | `dbx up` | Start the box, align it, sync, apply intents, verify services, migrate |
 | `dbx sync` | Guard the worktree binding, align, flush, report conflicts, migrate |
 | `dbx align` | Bring the devbox checkout to this worktree's tree (`--dry-run` prints the plan) |
-| `dbx status` | Label, box state, unexpected conflicts, pending migrations, per-service verdict |
+| `dbx status` | Label, box state, unexpected conflicts, migration state, per-service verdict |
 | `dbx services` | Apply the intents, restart if the generated config changed, verify |
 | `dbx migrate` | Migrations only (schema scopes; see below) |
 | `dbx exec -- <cmd>` | `hogli devbox:exec` with the box name filled in |
 | `dbx doctor` | ssh block, mutagen daemon, `dotfiles_uri`, ignore-list drift |
 
-Exit codes: `2` bad arguments, `3` the box serves a different worktree, `4` the box is not reachable, `5` align refused.
+Flags: `--workspace <name>` binds this worktree to a named box, `--repoint` moves a box to
+the worktree you are in, `--no-migrate` skips the migration step, `--force` aligns over
+changes made on the box, `--dry-run` prints an align plan.
+
+Exit codes: `2` bad arguments, `3` the box serves a different worktree, `4` the box is not
+reachable, `5` align refused.
+
+### For agents
+
+`skills/testing-on-devboxes/` is a skill covering this workflow, installed into
+`~/.claude/skills` and `~/.codex/skills` by `local/bootstrap.sh` as a symlink, so it tracks
+the repo. Clone this repo and run bootstrap to pick it up.
+
+## How it works
 
 ### One worktree, one devbox
 
@@ -56,7 +127,7 @@ Align refuses (exit 5) when the box holds commits reachable from neither your HE
 
 They apply the schema scopes only: `postgres`, `clickhouse`, `persons`, `cyclotron`, `behavioral-cohorts`, `flags-read-store`. `async` is left out: it applies no non-noop migration of its own, and its `--check` fails on a 1.40-era backfill nobody runs locally. `tasks-oauth` and `temporal-schedules` are deploy-time concerns and no-ops under `DEBUG=1`.
 
-The flox environment is prepended to `PATH` for the run. `bin/migrate` shells out to `sqlx` for the Rust migrators, `sqlx` exists only inside flox, and an ssh command runs no profile that would put it there.
+Every remote command runs inside `flox activate`. `bin/migrate` shells out to `sqlx` for the Rust migrators, `sqlx` exists only inside flox, and an ssh command runs no profile that would set it up. A `PATH` prepend is not a substitute: it finds the binaries, and `node-rdkafka` then fails to load `liblz4.so.1`, because activation sets up shared-library resolution no `PATH` entry provides. Without it most of the dev stack dies on "command not found".
 
 `dbx status` reports pending Django migrations only, and reports them advisorily: `sync` and `up` migrate whether or not it says anything.
 

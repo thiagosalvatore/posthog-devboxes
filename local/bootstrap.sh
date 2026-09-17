@@ -20,6 +20,17 @@ case ":$PATH:" in
 *) log "note: $BIN_DIR is not on your PATH" ;;
 esac
 
+# Symlinked, not copied, so a `git pull` here updates the agents' copy too.
+for agent_dir in "$HOME/.claude/skills" "$HOME/.codex/skills"; do
+    [ -d "$(dirname "$agent_dir")" ] || continue
+    mkdir -p "$agent_dir"
+    for skill in "$DBX_ROOT"/skills/*/; do
+        [ -d "$skill" ] || continue
+        ln -sfn "${skill%/}" "$agent_dir/$(basename "$skill")"
+        log "linked $agent_dir/$(basename "$skill")"
+    done
+done
+
 python3 - "$HOGLI_DEVBOX_CONFIG" "$DOTFILES_URI" <<'PY'
 import json
 import pathlib
