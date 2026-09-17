@@ -9,8 +9,6 @@ REMOTE_PROC_STATUS='$HOME/.config/coderv2/dotfiles/proc-status.sh'
 # Same search order as the repo's own bin/helpers/worktree-borrow.sh.
 # shellcheck disable=SC2016
 REMOTE_VENV_EXPR='for v in .flox/cache/venv .venv env; do [ -d "$v" ] && echo "$v" && break; done'
-# shellcheck disable=SC2016
-REMOTE_FLOX_PATH='PATH="$(printf "%s:" .flox/run/*/bin)$PATH"'
 REMOTE_PYTHON="\"\$($REMOTE_VENV_EXPR)/bin/python\""
 TEMPORAL_FRONTEND_PORT=7233
 
@@ -136,7 +134,7 @@ verify_services() {
 # a 1.40-era backfill local dev never runs.
 migration_state() {
     local report state=""
-    report="$(remote_repo "$REMOTE_FLOX_PATH $REMOTE_HOGLI migrations:status" 2>/dev/null)" || {
+    report="$(remote_repo "$REMOTE_HOGLI migrations:status" 2>/dev/null)" || {
         echo "unknown"
         return 0
     }
@@ -151,11 +149,10 @@ migration_state() {
 }
 
 # Through hogli, which activates the venv bin/migrate's bare `python` needs and
-# supplies DEBUG=1. The flox prepend is still ours to add: bin/migrate shells out
-# to sqlx for the Rust migrators, sqlx lives only in the flox environment, and an
-# ssh command runs no profile that would put it on PATH.
+# supplies DEBUG=1. bin/migrate also shells out to sqlx for the Rust migrators,
+# which remote_repo's flox activation supplies.
 run_migrations() {
     log "applying migrations on $WORKSPACE_NAME"
-    remote_repo "$REMOTE_FLOX_PATH $MIGRATION_RETRY_ENV $REMOTE_HOGLI migrations:run $MIGRATION_SCOPES" \
+    remote_repo "$MIGRATION_RETRY_ENV $REMOTE_HOGLI migrations:run $MIGRATION_SCOPES" \
         || die "$DBX_EXIT_ERROR" "Migrations failed on $WORKSPACE_NAME."
 }
