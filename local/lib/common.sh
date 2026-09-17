@@ -75,20 +75,31 @@ remote_stdin() {
     ssh -o BatchMode=yes "coder.${WORKSPACE_NAME}" "$1"
 }
 
-# An ssh command runs no login profile, so nothing sets up the flox environment
-# the dev stack is built against, and every unit phrocs spawns inherits what is
-# missing: frontend, nodejs, ingestion and agent-proxy die on pnpm, llm-gateway
-# on uv, migrate-behavioral-cohorts on sqlx.
+# Git, config reads, docker and anything else the system toolchain can serve.
+# One ssh round trip, no activation.
+remote_repo() {
+    remote "cd '$REMOTE_REPO_PATH' && $1"
+}
+
+# For a command that starts a dev-stack unit or runs a Rust migrator. An ssh
+# command runs no login profile, so nothing sets up the flox environment the
+# stack is built against, and every unit phrocs spawns inherits what is missing:
+# frontend, nodejs, ingestion and agent-proxy die on pnpm, llm-gateway on uv,
+# bin/migrate's Rust migrators on sqlx.
 #
 # Activation rather than a PATH prepend, because they are not equivalent.
 # Prepending .flox/run/*/bin does find those binaries, and node-rdkafka then
 # fails to load with "liblz4.so.1: cannot open shared object file" -- activation
-# sets up shared-library resolution that no PATH entry can. It costs about two
-# seconds and writes its banner to stderr, so stdout stays parseable.
+# sets up shared-library resolution that no PATH entry can.
+#
+# Not the default, because this repo's activation hook runs every time: about
+# seven seconds, a banner on stderr, and a lock that serializes concurrent
+# activations. `dbx status` makes ten remote calls, and paying it on each one
+# turned a fast command into a slow one.
 #
 # The command travels base64-encoded so its own quoting survives the trip
 # through ssh, the remote login shell, and bash -c.
-remote_repo() {
+remote_repo_flox() {
     local encoded
     encoded="$(printf '%s' "$1" | base64 | tr -d '\n')"
     remote "cd '$REMOTE_REPO_PATH' && DBX_CMD=\$(printf %s '$encoded' | base64 -d) && \
@@ -98,12 +109,6 @@ remote_repo() {
             bash -c \"\$DBX_CMD\"; \
         fi"
 }
-
-# Same, but stdin flows through to the remote command (`git apply -`).
-remote_stdin() {
-    ssh -o BatchMode=yes "coder.${WORKSPACE_NAME}" "$1"
-}
-
 
 ssh_alias_resolves() {
     ssh -G "coder.${WORKSPACE_NAME}" 2>/dev/null | grep -qi '^proxycommand .'

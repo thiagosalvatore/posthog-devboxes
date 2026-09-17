@@ -68,7 +68,7 @@ apply_intents() {
 }
 
 _start_stack() {
-    remote_repo "$REMOTE_HOGLI start -y -d" \
+    remote_repo_flox "$REMOTE_HOGLI start -y -d" \
         || die "$DBX_EXIT_ERROR" "\`hogli start -y -d\` failed on $WORKSPACE_NAME."
 }
 
@@ -151,8 +151,24 @@ migration_state() {
 # Through hogli, which activates the venv bin/migrate's bare `python` needs and
 # supplies DEBUG=1. bin/migrate also shells out to sqlx for the Rust migrators,
 # which remote_repo's flox activation supplies.
+# The dev stack runs its own migrate-* units on every start, because they sit in
+# intent-map.yaml's always_required. Two Django migrations against one database
+# end with one of them terminated, so wait for the stack's before adding ours.
+_wait_for_stack_migrations() {
+    local waited=0
+    while [ "$waited" -lt "${DBX_MIGRATE_WAIT:-900}" ]; do
+        remote_repo "bash $REMOTE_PROC_STATUS 2>/dev/null | grep -E '^migrate-' | grep -qvE ' (done|stopped|crashed) '" \
+            || return 0
+        [ "$waited" -eq 0 ] && log "waiting for the stack's own migrate units to finish..."
+        sleep 10
+        waited=$((waited + 10))
+    done
+    warn "the stack's migrate units are still running after ${DBX_MIGRATE_WAIT:-900}s; migrating anyway"
+}
+
 run_migrations() {
+    _wait_for_stack_migrations
     log "applying migrations on $WORKSPACE_NAME"
-    remote_repo "$MIGRATION_RETRY_ENV $REMOTE_HOGLI migrations:run $MIGRATION_SCOPES" \
+    remote_repo_flox "$MIGRATION_RETRY_ENV $REMOTE_HOGLI migrations:run $MIGRATION_SCOPES" \
         || die "$DBX_EXIT_ERROR" "Migrations failed on $WORKSPACE_NAME."
 }
