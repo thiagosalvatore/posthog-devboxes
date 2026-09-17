@@ -69,20 +69,26 @@ _align_stranded_commits() {
     remote_repo "git rev-list --count HEAD $excludes"
 }
 
+expected_box_changes_file() { echo "$DBX_ROOT/local/expected-box-changes.txt"; }
+
 # Working-tree content on the box that matches neither the tree we are about to
-# check out nor the box's own last commit, minus whatever our patch explains.
+# check out nor the box's own last commit, minus whatever our patch explains and
+# minus the paths the box's own boot scripts are known to rewrite.
 # A file mutagen already overwrote matches our tree; a file mutagen refused to
-# overwrite matches the box's commit; only a human's edit on the box matches
+# overwrite matches the box's commit; only an edit made on the box matches
 # neither.
 _align_unexplained_paths() {
-    local patched
-    patched="$(mktemp)"
-    git -C "$WORKTREE_ROOT" diff HEAD --name-only | sort -u >"$patched"
+    local excused
+    excused="$(mktemp)"
+    {
+        git -C "$WORKTREE_ROOT" diff HEAD --name-only
+        grep -vE '^\s*(#|$)' "$(expected_box_changes_file)" 2>/dev/null
+    } | sort -u >"$excused"
     comm -12 \
         <(remote_repo "git diff --name-only $ALIGN_REF" | sort -u) \
         <(remote_repo "git diff --name-only HEAD" | sort -u) \
-        | comm -23 - "$patched"
-    rm -f "$patched"
+        | comm -23 - "$excused"
+    rm -f "$excused"
 }
 
 align_plan() {

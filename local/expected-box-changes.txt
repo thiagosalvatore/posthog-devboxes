@@ -1,0 +1,8 @@
+# Tracked files the devbox's own boot scripts rewrite, one path per line.
+# `dbx align` discards them without asking; anything else that matches neither
+# your tree nor the box's last commit is treated as work done on the box, and
+# align refuses.
+#
+# install-claude-plugins.sh runs `claude plugin install typescript-lsp --scope
+# project` inside ~/posthog, and claude rewrites this file on every fresh box.
+.claude/settings.json

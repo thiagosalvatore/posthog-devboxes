@@ -20,6 +20,13 @@ TEMPORAL_FRONTEND_PORT=7233
 # are deploy-time concerns and no-ops under DEBUG=1.
 MIGRATION_SCOPES="--scope=postgres --scope=clickhouse --scope=persons --scope=cyclotron --scope=behavioral-cohorts --scope=flags-read-store"
 
+# bin/migrate retries the Django step ten times with a doubling backoff, which
+# assumes the database is briefly unreachable. On a devbox it is not: the stack
+# is verified up before this runs, so a failure is a schema conflict that will
+# fail the same way ten times. Ten attempts spend about 25 minutes sleeping;
+# three spend nine seconds and still ride out a real hiccup.
+MIGRATION_RETRY_ENV="MIGRATE_MAX_RETRIES=3"
+
 default_intents() {
     sed -e 's/#.*//' "$DBX_ROOT/intents.default" | tr '\n' ' ' | tr -s ' ' | sed -e 's/^ //' -e 's/ $//'
 }
@@ -149,6 +156,6 @@ migration_state() {
 # ssh command runs no profile that would put it on PATH.
 run_migrations() {
     log "applying migrations on $WORKSPACE_NAME"
-    remote_repo "$REMOTE_FLOX_PATH $REMOTE_HOGLI migrations:run $MIGRATION_SCOPES" \
+    remote_repo "$REMOTE_FLOX_PATH $MIGRATION_RETRY_ENV $REMOTE_HOGLI migrations:run $MIGRATION_SCOPES" \
         || die "$DBX_EXIT_ERROR" "Migrations failed on $WORKSPACE_NAME."
 }
