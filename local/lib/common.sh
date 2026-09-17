@@ -75,9 +75,35 @@ remote_stdin() {
     ssh -o BatchMode=yes "coder.${WORKSPACE_NAME}" "$1"
 }
 
+# An ssh command runs no login profile, so nothing sets up the flox environment
+# the dev stack is built against, and every unit phrocs spawns inherits what is
+# missing: frontend, nodejs, ingestion and agent-proxy die on pnpm, llm-gateway
+# on uv, migrate-behavioral-cohorts on sqlx.
+#
+# Activation rather than a PATH prepend, because they are not equivalent.
+# Prepending .flox/run/*/bin does find those binaries, and node-rdkafka then
+# fails to load with "liblz4.so.1: cannot open shared object file" -- activation
+# sets up shared-library resolution that no PATH entry can. It costs about two
+# seconds and writes its banner to stderr, so stdout stays parseable.
+#
+# The command travels base64-encoded so its own quoting survives the trip
+# through ssh, the remote login shell, and bash -c.
 remote_repo() {
-    remote "cd '$REMOTE_REPO_PATH' && $1"
+    local encoded
+    encoded="$(printf '%s' "$1" | base64 | tr -d '\n')"
+    remote "cd '$REMOTE_REPO_PATH' && DBX_CMD=\$(printf %s '$encoded' | base64 -d) && \
+        if command -v flox >/dev/null 2>&1 && [ -d .flox ]; then \
+            flox activate -- bash -c \"\$DBX_CMD\"; \
+        else \
+            bash -c \"\$DBX_CMD\"; \
+        fi"
 }
+
+# Same, but stdin flows through to the remote command (`git apply -`).
+remote_stdin() {
+    ssh -o BatchMode=yes "coder.${WORKSPACE_NAME}" "$1"
+}
+
 
 ssh_alias_resolves() {
     ssh -G "coder.${WORKSPACE_NAME}" 2>/dev/null | grep -qi '^proxycommand .'
